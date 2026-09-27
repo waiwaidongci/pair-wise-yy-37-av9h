@@ -50,6 +50,10 @@ class Repository:
                     status TEXT NOT NULL DEFAULT 'open'
                         CHECK(status IN ('open','closed')),
                     external_ref TEXT,
+                    review_note TEXT,
+                    review_ref TEXT,
+                    reviewed_by TEXT,
+                    reviewed_at TEXT,
                     created_by TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     UNIQUE(item_id, external_ref)
@@ -66,6 +70,18 @@ class Repository:
                     created_at TEXT NOT NULL
                 );
             """)
+        self._migrate_records()
+
+    def _migrate_records(self) -> None:
+        with self._lock, self.conn:
+            columns = {row["name"] for row in
+                       self.conn.execute("PRAGMA table_info(records)").fetchall()}
+            for column in ("review_note", "review_ref", "reviewed_by", "reviewed_at"):
+                if column not in columns:
+                    self.conn.execute(f"ALTER TABLE records ADD COLUMN {column} TEXT")
+            self.conn.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS ux_records_review_ref
+                   ON records(review_ref) WHERE review_ref IS NOT NULL""")
 
     @staticmethod
     def _item(row: sqlite3.Row) -> Dict[str, Any]:
@@ -156,6 +172,41 @@ class Repository:
                 (item_id,),
             ).fetchone()
         return int(row["n"])
+
+    def unreviewed_record_count(self, item_id: int) -> int:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT COUNT(*) AS n FROM records WHERE item_id=? AND review_ref IS NULL",
+                (item_id,),
+            ).fetchone()
+        return int(row["n"])
+
+    def review_record(self, item_id: int, record_id: int, review_note: str,
+                      review_ref: str, actor: str) -> Dict[str, Any]:
+        now = utc_now()
+        self.get_item(item_id)
+        with self._lock, self.conn:
+            row = self.conn.execute(
+                "SELECT * FROM records WHERE id=? AND item_id=?", (record_id, item_id)
+            ).fetchone()
+            if row is None:
+                raise NotFoundError("记录不存在")
+            if row["review_ref"] is not None:
+                raise ConflictError("该记录已复核通过，不能重复提交")
+            try:
+                cur = self.conn.execute(
+                    """UPDATE records SET review_note=?, review_ref=?, reviewed_by=?,
+                       reviewed_at=?, status='closed'
+                       WHERE id=? AND review_ref IS NULL""",
+                    (review_note, review_ref, actor, now, record_id),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ConflictError("复核编号已存在") from exc
+            if cur.rowcount == 0:
+                raise ConflictError("该记录已复核通过，不能重复提交")
+            row = self.conn.execute(
+                "SELECT * FROM records WHERE id=?", (record_id,)).fetchone()
+        return dict(row)
 
     def append_audit(self, action: str, entity_type: str, entity_id: int,
                      actor: str, detail: dict) -> Dict[str, Any]:

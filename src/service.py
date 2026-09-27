@@ -4,10 +4,10 @@ from typing import Any, Dict, Optional
 
 from .domain import ensure_role, normalize_severity, require_number, require_text
 from .repository import Repository
-from .rules import (AUDIT_ROLES, CREATE_ROLES, ENTITY, RECORD_ROLES, TITLE,
-                    VIEW_ROLES, completion_blockers, escalation_required,
-                    priority_score, response_deadline_hours, role_for_transition,
-                    validate_transition)
+from .rules import (AUDIT_ROLES, CREATE_ROLES, ENTITY, RECORD_ROLES,
+                    REVIEW_ROLES, TITLE, VIEW_ROLES, completion_blockers,
+                    escalation_required, priority_score, response_deadline_hours,
+                    role_for_transition, validate_transition)
 
 
 class Service:
@@ -55,6 +55,19 @@ class Service:
         })
         return record
 
+    def review_record(self, item_id: int, record_id: int, payload: Dict[str, Any],
+                      actor: str, role: str) -> Dict[str, Any]:
+        ensure_role(role, REVIEW_ROLES)
+        actor = require_text(actor, "actor", 100)
+        review_note = require_text(payload.get("review_note"), "review_note")
+        review_ref = require_text(payload.get("review_ref"), "review_ref", 100)
+        record = self.repository.review_record(item_id, record_id, review_note,
+                                               review_ref, actor)
+        self.repository.append_audit("review", ENTITY, item_id, actor, {
+            "record_id": record["id"], "review_ref": review_ref,
+        })
+        return record
+
     def transition(self, item_id: int, target: str, expected_version: int,
                    actor: str, role: str) -> Dict[str, Any]:
         actor = require_text(actor, "actor", 100)
@@ -63,7 +76,8 @@ class Service:
         ensure_role(role, role_for_transition(target))
         if not isinstance(expected_version, int) or expected_version < 1:
             raise ValueError("expected_version必须是正整数")
-        blockers = completion_blockers(target, self.repository.open_record_count(item_id))
+        blockers = completion_blockers(target, self.repository.open_record_count(item_id),
+                                       self.repository.unreviewed_record_count(item_id))
         if blockers:
             from .domain import ConflictError
             raise ConflictError("；".join(blockers))
