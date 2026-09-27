@@ -66,6 +66,16 @@ class Repository:
                     created_at TEXT NOT NULL
                 );
             """)
+            self._migrate_records()
+
+    def _migrate_records(self) -> None:
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(records)")}
+        for column in ("review_note", "review_ref", "reviewed_by", "reviewed_at"):
+            if column not in columns:
+                self.conn.execute(f"ALTER TABLE records ADD COLUMN {column} TEXT")
+        self.conn.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS ux_records_review_ref
+               ON records(review_ref) WHERE review_ref IS NOT NULL""")
 
     @staticmethod
     def _item(row: sqlite3.Row) -> Dict[str, Any]:
@@ -156,6 +166,48 @@ class Repository:
                 (item_id,),
             ).fetchone()
         return int(row["n"])
+
+    def unreviewed_record_count(self, item_id: int) -> int:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT COUNT(*) AS n FROM records WHERE item_id=? AND review_ref IS NULL",
+                (item_id,),
+            ).fetchone()
+        return int(row["n"])
+
+    def review_record(self, item_id: int, record_id: int, review_note: str,
+                      review_ref: str, actor: str) -> Dict[str, Any]:
+        now = utc_now()
+        self.get_item(item_id)
+        try:
+            with self._lock, self.conn:
+                row = self.conn.execute(
+                    "SELECT * FROM records WHERE id=? AND item_id=?",
+                    (record_id, item_id),
+                ).fetchone()
+                if row is None:
+                    raise NotFoundError("记录不存在")
+                if row["review_ref"] is not None:
+                    raise ConflictError("该记录已复核通过，不能重复提交")
+                duplicate = self.conn.execute(
+                    "SELECT 1 FROM records WHERE review_ref=?", (review_ref,)
+                ).fetchone()
+                if duplicate is not None:
+                    raise ConflictError("复核编号已存在")
+                cur = self.conn.execute(
+                    """UPDATE records SET review_note=?, review_ref=?, reviewed_by=?,
+                       reviewed_at=?, status='closed'
+                       WHERE id=? AND review_ref IS NULL""",
+                    (review_note, review_ref, actor, now, record_id),
+                )
+                if cur.rowcount == 0:
+                    raise ConflictError("该记录已复核通过，不能重复提交")
+                row = self.conn.execute(
+                    "SELECT * FROM records WHERE id=?", (record_id,)
+                ).fetchone()
+        except sqlite3.IntegrityError as exc:
+            raise ConflictError("复核编号已存在") from exc
+        return dict(row)
 
     def append_audit(self, action: str, entity_type: str, entity_id: int,
                      actor: str, detail: dict) -> Dict[str, Any]:

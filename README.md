@@ -29,10 +29,11 @@ python3 app.py --db ./data.db --port 8314
 - `POST /api/items`
 - `GET /api/items/{id}`
 - `POST /api/items/{id}/records`
+- `POST /api/items/{id}/records/{record_id}/review`，检查员提交`review_note`（复核说明）和`review_ref`（复核编号）
 - `POST /api/items/{id}/transition`，必须提交`expected_version`
 - `GET /api/audit`
 
-允许角色：applicant, inspector, compliance_manager, viewer。申报量超过许可量或检查发现高严重度问题时提高优先级；存在未关闭整改时不能批准。
+允许角色：applicant, inspector, compliance_manager, viewer。申报量超过许可量或检查发现高严重度问题时提高优先级；存在未关闭整改时不能批准。复核通过后记录关闭并在列表中显示复核说明与复核编号；已复核或复核编号重复时拒绝再次提交且不覆盖原结果。整改阶段只有全部记录复核通过，合规负责人才能批准；复核与批准均写入审计链。
 
 ## 测试
 
